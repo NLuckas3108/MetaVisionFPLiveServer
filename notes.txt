@@ -3,4 +3,4 @@ docker run --gpus all --network host \
   -v /tmp/fp_shared:/data \
   -w /workspace \
   -it foundationpose:with_realsense \
-  bash -c "export PATH=/opt/conda/envs/my/bin:$PATH && python mt_fp_live.py"
+  bash -c "export PATH=/opt/conda/envs/my/bin:$PATH && python MetaVisionFPLiveServer/mt_fp_live.py"
