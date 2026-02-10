@@ -53,14 +53,7 @@ class FPRunner:
         color_array = np.array([90, 160, 200])
         mesh = trimesh_add_pure_colored_texture(mesh, color_array)
         
-        # --- ÄNDERUNG START ---
-        # Statt komplizierter orientierter Box nehmen wir die simplen min/max Werte.
-        # Das passt viel besser zur Pose, die FoundationPose liefert.
         self.bbox = mesh.bounds # [[min_x, y, z], [max_x, y, z]]
-        
-        # Wir brauchen to_origin nicht mehr zwingend, 
-        # da wir die Pose direkt auf die Mesh-Koordinaten anwenden.
-        # --- ÄNDERUNG ENDE ---
         
         self.est = FoundationPose(
             model_pts=mesh.vertices, 
@@ -91,9 +84,6 @@ class FPRunner:
             [max_pt[0], max_pt[1], max_pt[2]]
         ])
         
-        # 2. Transformieren: Einfach Pose * Punkt
-        # pose ist 4x4 (Rotation + Translation)
-        
         # Rotation (3x3) und Translation (3)
         R = pose[:3, :3]
         t = pose[:3, 3]
@@ -115,8 +105,7 @@ class FPRunner:
         H, W = rgb.shape[:2]
         pose = None
         
-        # Iteration 1 ist Minimum wegen Bug in FP
-        iter_count = 1 
+        iter_count = 3
         
         if self.is_first_frame:
             mask = make_mask_from_rect(self.mask_rect, W, H)
@@ -124,10 +113,10 @@ class FPRunner:
             self.is_first_frame = False
             print("[DOCKER] Initial Registration done.")
         else:
-            # Nur Tracking, keine Zeitmessung hier (machen wir draußen)
+            # Nur Tracking, keine Zeitmessung 
             pose = self.est.track_one(rgb=rgb, depth=depth, K=self.K, iteration=iter_count)
 
-        # Berechne nur die Punkte (superschnell)
+        # Berechne nur die Punkte
         try:
             points_2d = self.get_box_points_2d(pose, self.K)
             return points_2d, pose
@@ -188,12 +177,13 @@ def main():
             if not runner.mesh_loaded:
                 continue 
             
-            # Dekomprimierung
             if "rgb_compressed" in packet:
                 rgb_bytes = packet["rgb_compressed"]
-                rgb = cv2.imdecode(rgb_bytes, cv2.IMREAD_COLOR)
+                rgb_bgr = cv2.imdecode(rgb_bytes, cv2.IMREAD_COLOR)
+                rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
             else:
-                rgb = packet["rgb"]
+                rgb_bgr = packet["rgb"]
+                rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
             
             depth_raw = packet["depth"]
             depth = depth_raw.astype(np.float32) / 1000.0
@@ -201,23 +191,19 @@ def main():
             try:
                 # --- ZEITMESSUNG START ---
                 t_start = time.time()
-                
-                # Hier passiert die Magie (GPU Tracking + Projektion der Punkte)
                 points_2d, pose = runner.process_frame(rgb, depth)
-                
                 # --- ZEITMESSUNG ENDE ---
                 dt = time.time() - t_start
                 if dt > 0:
                     print(f"Compute FPS: {1.0/dt:.1f} ({dt*1000:.1f}ms)")
                 
                 if points_2d is not None:
-                    # Zeitstempel generieren (Nanosekunden für Präzision)
                     ts = time.time() 
                     
                     payload = {
                         "box_points": points_2d,
-                        "pose": pose,         # <--- NEU: Die 4x4 Matrix
-                        "timestamp": ts  # <--- NEU: Zeitstempel
+                        "pose": pose, 
+                        "timestamp": ts 
                     }
                     vid_out_socket.send_pyobj(payload)
                 else:
