@@ -105,7 +105,7 @@ class FPRunner:
         H, W = rgb.shape[:2]
         pose = None
         
-        iter_count = 3
+        iter_count = 1
         
         if self.is_first_frame:
             mask = make_mask_from_rect(self.mask_rect, W, H)
@@ -177,17 +177,44 @@ def main():
             if not runner.mesh_loaded:
                 continue 
             
+            # --- 1. RGB BEHANDLUNG (Unabhängig von Depth!) ---
             if "rgb_compressed" in packet:
+                # Fall A: JPEG Komprimiert (Standard vom Client)
                 rgb_bytes = packet["rgb_compressed"]
                 rgb_bgr = cv2.imdecode(rgb_bytes, cv2.IMREAD_COLOR)
                 rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
-            else:
+            elif "rgb" in packet:
+                # Fall B: Rohdaten (Fallback)
                 rgb_bgr = packet["rgb"]
                 rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
-            
-            depth_raw = packet["depth"]
-            depth = depth_raw.astype(np.float32) / 1000.0
-            
+            else:
+                print("[ERROR] Paket enthält weder 'rgb' noch 'rgb_compressed'.")
+                continue # Frame überspringen
+
+            # --- 2. DEPTH BEHANDLUNG ---
+            if "depth_compressed" in packet:
+                # Fall A: Komprimiert (PNG oder ZLIB)
+                if "encoding" in packet and packet["encoding"] == "png":
+                    # PNG Dekodierung (CV2)
+                    depth_raw = cv2.imdecode(packet["depth_compressed"], cv2.IMREAD_UNCHANGED)
+                else:
+                    # ZLIB Dekodierung (Standard/Schnell)
+                    import zlib
+                    depth_data = zlib.decompress(packet["depth_compressed"])
+                    dtype = packet.get("dtype", "uint16")
+                    shape = packet.get("shape", (480, 640))
+                    depth_raw = np.frombuffer(depth_data, dtype=dtype).reshape(shape)
+                
+                depth = depth_raw.astype(np.float32) / 1000.0
+
+            elif "depth" in packet:
+                # Fall B: Rohdaten
+                depth_raw = packet["depth"]
+                depth = depth_raw.astype(np.float32) / 1000.0
+            else:
+                print("[ERROR] Paket enthält keine Tiefendaten.")
+                continue
+
             try:
                 # --- ZEITMESSUNG START ---
                 t_start = time.time()
