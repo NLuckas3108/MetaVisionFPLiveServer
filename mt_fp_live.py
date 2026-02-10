@@ -6,24 +6,81 @@ import numpy as np
 import cv2
 import zmq
 import trimesh
+import threading
+import queue
 
-# --- Deine originalen Imports ---
 from estimater import *
 from datareader import *
 from myUtils import *
 
-# --- KONFIGURATION (INTERN IM DOCKER) ---
 PORT_CMD = 6666
-PORT_VID_IN = 6667   # Korrekter Name
+PORT_VID_IN = 6667   
 PORT_VID_OUT = 6668
 SHARED_DIR = "/data"
 
 def make_mask_from_rect(rect, width, height):
-    """Erstellt die Boolesche Maske für FoundationPose aus dem Rechteck"""
     x, y, w, h = rect
     mask = np.zeros((height, width), dtype=np.uint8)
     mask[y:y+h, x:x+w] = 1
     return mask.astype(bool).astype(np.uint8)
+
+class PacketDecoder(threading.Thread):
+    def __init__(self, context, port_in):
+        super().__init__()
+        self.socket = context.socket(zmq.PULL)
+        self.socket.setsockopt(zmq.CONFLATE, 1)
+        self.socket.bind(f"tcp://0.0.0.0:{port_in}")
+        self.running = True
+        self.latest_frame = None
+        self.lock = threading.Lock()
+        
+        self.packet_count = 0
+        self.start_time = time.time()
+        
+    def run(self):
+        print("[DOCKER] Decoder-Thread gestartet.")
+        while self.running:
+            try:
+                packet = self.socket.recv_pyobj()
+                
+                rgb = None
+                depth = None
+                
+                if "rgb_compressed" in packet:
+                    rgb_bytes = packet["rgb_compressed"]
+                    rgb_bgr = cv2.imdecode(rgb_bytes, cv2.IMREAD_COLOR)
+                    rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
+                elif "rgb" in packet:
+                    rgb_bgr = packet["rgb"]
+                    rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
+                
+                if "depth_compressed" in packet:
+                    if "encoding" in packet and packet["encoding"] == "png":
+                        depth_raw = cv2.imdecode(packet["depth_compressed"], cv2.IMREAD_UNCHANGED)
+                    else:
+                        import zlib
+                        depth_data = zlib.decompress(packet["depth_compressed"])
+                        dtype = packet.get("dtype", "uint16")
+                        shape = packet.get("shape", (480, 640))
+                        depth_raw = np.frombuffer(depth_data, dtype=dtype).reshape(shape)
+                    
+                    depth = depth_raw.astype(np.float32) / 1000.0
+                elif "depth" in packet:
+                    depth_raw = packet["depth"]
+                    depth = depth_raw.astype(np.float32) / 1000.0
+
+                if rgb is not None and depth is not None:
+                    with self.lock:
+                        self.latest_frame = (rgb, depth)
+                    
+            except Exception as e:
+                print(f"Decoder Error: {e}")
+
+    def get_latest(self):
+        with self.lock:
+            frame = self.latest_frame
+            self.latest_frame = None
+            return frame
 
 class FPRunner:
     def __init__(self):
@@ -31,8 +88,7 @@ class FPRunner:
         self.scorer = ScorePredictor()
         self.refiner = PoseRefinePredictor()
         self.glctx = dr.RasterizeCudaContext()
-        
-        # State
+
         self.mesh_loaded = False
         self.bbox = None
         self.to_origin = None
@@ -47,13 +103,13 @@ class FPRunner:
         mesh = trimesh.load(mesh_path, force='mesh')
         mesh.apply_scale(0.001) 
         
-        if len(mesh.faces) > 100000:
-            mesh = mesh.simplify_quadratic_decimation(100000)
+        if len(mesh.faces) > 10000:
+            mesh = mesh.simplify_quadratic_decimation(10000)
             
         color_array = np.array([90, 160, 200])
         mesh = trimesh_add_pure_colored_texture(mesh, color_array)
         
-        self.bbox = mesh.bounds # [[min_x, y, z], [max_x, y, z]]
+        self.bbox = mesh.bounds 
         
         self.est = FoundationPose(
             model_pts=mesh.vertices, 
@@ -67,9 +123,6 @@ class FPRunner:
         print("[DOCKER] FoundationPose ready.")
 
     def get_box_points_2d(self, pose, K):
-        """Berechnet die 2D-Bildkoordinaten der simplen AABB"""
-        
-        # 1. Die 8 Ecken der Box basierend auf den min/max Werten des Meshes
         min_pt = self.bbox[0]
         max_pt = self.bbox[1]
         
@@ -84,16 +137,13 @@ class FPRunner:
             [max_pt[0], max_pt[1], max_pt[2]]
         ])
         
-        # Rotation (3x3) und Translation (3)
         R = pose[:3, :3]
         t = pose[:3, 3]
         
-        # P_cam = R * P_obj + t
         corners_cam = (R @ corners_3d.T).T + t
         
-        # 3. Projizieren
         corners_2d_hom = (K @ corners_cam.T).T
-        corners_2d_hom[:, 2] = np.maximum(corners_2d_hom[:, 2], 0.001) # Schutz vor Z=0
+        corners_2d_hom[:, 2] = np.maximum(corners_2d_hom[:, 2], 0.001) 
         
         corners_2d = corners_2d_hom[:, :2] / corners_2d_hom[:, 2:]
         
@@ -113,10 +163,8 @@ class FPRunner:
             self.is_first_frame = False
             print("[DOCKER] Initial Registration done.")
         else:
-            # Nur Tracking, keine Zeitmessung 
             pose = self.est.track_one(rgb=rgb, depth=depth, K=self.K, iteration=iter_count)
 
-        # Berechne nur die Punkte
         try:
             points_2d = self.get_box_points_2d(pose, self.K)
             return points_2d, pose
@@ -127,117 +175,63 @@ class FPRunner:
 def main():
     context = zmq.Context()
     
-    # Sockets
     cmd_socket = context.socket(zmq.REP)
     cmd_socket.bind(f"tcp://0.0.0.0:{PORT_CMD}")
-    
-    vid_in_socket = context.socket(zmq.PULL)
-    vid_in_socket.setsockopt(zmq.CONFLATE, 1)
-    vid_in_socket.bind(f"tcp://0.0.0.0:{PORT_VID_IN}")
     
     vid_out_socket = context.socket(zmq.PUSH)
     vid_out_socket.bind(f"tcp://0.0.0.0:{PORT_VID_OUT}")
     
-    print(f"[DOCKER] High-Perf Pipeline (Points Only). CMD:{PORT_CMD}, IN:{PORT_VID_IN}, OUT:{PORT_VID_OUT}")
+    decoder_thread = PacketDecoder(context, PORT_VID_IN)
+    decoder_thread.daemon = True
+    decoder_thread.start()
     
     runner = FPRunner()
     
     poller = zmq.Poller()
     poller.register(cmd_socket, zmq.POLLIN)
-    poller.register(vid_in_socket, zmq.POLLIN)
+
+    print("[DOCKER] High-Perf Pipeline (Threaded Decode).")
 
     while True:
-        socks = dict(poller.poll())
-
+        socks = dict(poller.poll(0))
+        
         if cmd_socket in socks:
             msg = cmd_socket.recv_pyobj()
             cmd = msg.get("cmd")
-            
             if cmd == "INIT":
                 try:
                     runner.mask_rect = msg["mask_rect"]
-                    if "K" in msg:
-                        runner.K = np.array(msg["K"])
-                        print(f"[DOCKER] Nutze Kamera-Intrinsics: \n{runner.K}")
+                    if "K" in msg: runner.K = np.array(msg["K"])
                     runner.load_mesh(msg["filename"])
                     runner.is_first_frame = True 
                     cmd_socket.send_string("OK")
-                except Exception as e:
-                    print(f"Init Error: {e}")
-                    cmd_socket.send_string("ERROR")
-
+                except: cmd_socket.send_string("ERROR")
             elif cmd == "STOP":
                 runner.mesh_loaded = False 
                 cmd_socket.send_string("OK")
-                print("[DOCKER] Tracking gestoppt.")
 
-        if vid_in_socket in socks:
-            packet = vid_in_socket.recv_pyobj()
+        frame_data = decoder_thread.get_latest()
+        
+        if frame_data and runner.mesh_loaded:
+            rgb, depth = frame_data
             
-            if not runner.mesh_loaded:
-                continue 
-            
-            # --- 1. RGB BEHANDLUNG (Unabhängig von Depth!) ---
-            if "rgb_compressed" in packet:
-                # Fall A: JPEG Komprimiert (Standard vom Client)
-                rgb_bytes = packet["rgb_compressed"]
-                rgb_bgr = cv2.imdecode(rgb_bytes, cv2.IMREAD_COLOR)
-                rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
-            elif "rgb" in packet:
-                # Fall B: Rohdaten (Fallback)
-                rgb_bgr = packet["rgb"]
-                rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
-            else:
-                print("[ERROR] Paket enthält weder 'rgb' noch 'rgb_compressed'.")
-                continue # Frame überspringen
-
-            # --- 2. DEPTH BEHANDLUNG ---
-            if "depth_compressed" in packet:
-                # Fall A: Komprimiert (PNG oder ZLIB)
-                if "encoding" in packet and packet["encoding"] == "png":
-                    # PNG Dekodierung (CV2)
-                    depth_raw = cv2.imdecode(packet["depth_compressed"], cv2.IMREAD_UNCHANGED)
-                else:
-                    # ZLIB Dekodierung (Standard/Schnell)
-                    import zlib
-                    depth_data = zlib.decompress(packet["depth_compressed"])
-                    dtype = packet.get("dtype", "uint16")
-                    shape = packet.get("shape", (480, 640))
-                    depth_raw = np.frombuffer(depth_data, dtype=dtype).reshape(shape)
-                
-                depth = depth_raw.astype(np.float32) / 1000.0
-
-            elif "depth" in packet:
-                # Fall B: Rohdaten
-                depth_raw = packet["depth"]
-                depth = depth_raw.astype(np.float32) / 1000.0
-            else:
-                print("[ERROR] Paket enthält keine Tiefendaten.")
-                continue
-
             try:
-                # --- ZEITMESSUNG START ---
                 t_start = time.time()
                 points_2d, pose = runner.process_frame(rgb, depth)
-                # --- ZEITMESSUNG ENDE ---
+                
                 dt = time.time() - t_start
-                if dt > 0:
-                    print(f"Compute FPS: {1.0/dt:.1f} ({dt*1000:.1f}ms)")
+                if dt > 0: print(f"GPU FPS: {1.0/dt:.1f}")
                 
                 if points_2d is not None:
-                    ts = time.time() 
-                    
-                    payload = {
+                    vid_out_socket.send_pyobj({
                         "box_points": points_2d,
-                        "pose": pose, 
-                        "timestamp": ts 
-                    }
-                    vid_out_socket.send_pyobj(payload)
-                else:
-                    vid_out_socket.send_pyobj({"status": "error"})
-                
+                        "pose": pose,
+                        "timestamp": time.time()
+                    })
             except Exception as e:
-                print(f"[DOCKER] Crash: {e}")
+                print(f"Tracking Crash: {e}")
+        else:
+            time.sleep(0.001)
 
 if __name__ == '__main__':
     set_logging_format()
