@@ -4,6 +4,8 @@ import os
 import shutil
 import time
 import socket
+import cv2
+import base64
 
 # Externe Ports 
 EXT_PORT_CMD = 5555
@@ -53,7 +55,6 @@ class ProxyServer:
             print(f"[ERROR] Docker Init Timeout/Error: {e}")
             return False
 
-# Globale Instanz für CMD Loop
 proxy = ProxyServer()
 
 def video_forwarder():
@@ -127,15 +128,108 @@ def ext_command_loop():
                     print(f"[HOST] Fehler beim Stoppen: {e}")
                     socket.send_string("ERROR")
                     
+            elif cmd == "GET_TEXTURES":
+                print("[CONTROL] Client fragt nach Texturen...")
+                textures = get_available_textures()
+                socket.send_pyobj({"status": "OK", "textures": textures})
+                
+            elif cmd == "GET_TEXTURE_FULL":
+                tex_name = msg.get("name")
+                print(f"[PROXY] Client will High-Res Textur: {tex_name}")
+                full_data = load_full_texture_data(tex_name)
+                
+                if full_data:
+                    socket.send_pyobj({"status": "OK", "data": full_data})
+                else:
+                    socket.send_pyobj({"status": "ERROR"})
+
+            elif cmd == "SET_TEXTURE":
+                tex_name = msg.get("name")
+                print(f"[PROXY] Leite Textur-Wahl an Docker weiter: {tex_name}")
+                
+                try:
+                    proxy.docker_cmd.send_pyobj({
+                        "cmd": "SET_TEXTURE", 
+                        "name": tex_name
+                    })
+                    resp = proxy.docker_cmd.recv_string()
+                    socket.send_string(resp)
+                except Exception as e:
+                    print(f"[PROXY] Fehler beim Weiterleiten von SET_TEXTURE: {e}")
+                    socket.send_string("ERROR")
+                    
             else:
                 socket.send_string("UNKNOWN")
         except Exception as e:
             print(f"CMD Error: {e}")
+            
+def get_available_textures(texture_path="textures"):
+    texture_list = []
+    
+    if not os.path.exists(texture_path):
+        return []
+
+    for item in os.listdir(texture_path):
+        sub_dir = os.path.join(texture_path, item)
+        if os.path.isdir(sub_dir):
+            image_file = None
+            for f in os.listdir(sub_dir):
+                if "Color" in f and f.endswith(('.jpg', '.png')):
+                    image_file = os.path.join(sub_dir, f)
+                    break
+            
+            if not image_file:
+                for f in os.listdir(sub_dir):
+                    if f.endswith(('.jpg', '.png')):
+                        image_file = os.path.join(sub_dir, f)
+                        break
+            
+            if image_file:
+                img = cv2.imread(image_file)
+                thumb = cv2.resize(img, (64, 64))
+                _, buffer = cv2.imencode('.jpg', thumb, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+                thumb_bytes = buffer.tobytes()
+                
+                texture_list.append({
+                    "name": item,       
+                    "thumbnail": thumb_bytes
+                })
+    
+    return texture_list
+
+def load_full_texture_data(texture_name, base_path="textures"):
+    """Sucht die Original-Datei für eine Textur und gibt die Bytes zurück"""
+    target_dir = os.path.join(base_path, texture_name)
+    if not os.path.exists(target_dir):
+        return None
+    
+    image_path = None
+    for f in os.listdir(target_dir):
+        if "Color" in f and f.endswith(('.jpg', '.png')):
+            image_path = os.path.join(target_dir, f)
+            break
+    
+    if not image_path:
+        for f in os.listdir(target_dir):
+            if f.endswith(('.jpg', '.png')):
+                image_path = os.path.join(target_dir, f)
+                break
+                
+    if image_path:
+        with open(image_path, "rb") as f:
+            return f.read() 
+    return None
 
 if __name__ == "__main__":
     if not os.path.exists(SHARED_DIR):
         os.makedirs(SHARED_DIR)
-    os.chmod(SHARED_DIR, 0o777)
+    
+    try:
+        os.chmod(SHARED_DIR, 0o777)
+    except PermissionError:
+        print(f"[WARN] Konnte Rechte für {SHARED_DIR} nicht ändern (gehört evtl. root?). Mache weiter...")
+    except Exception as e:
+        print(f"[WARN] chmod Fehler: {e}")
 
     try:
         t1 = threading.Thread(target=ext_command_loop, daemon=True)

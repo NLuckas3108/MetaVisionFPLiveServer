@@ -1,4 +1,0 @@
-viser
-opencv-python-headless
-trimesh
-numpy

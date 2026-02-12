@@ -8,6 +8,7 @@ import zmq
 import trimesh
 import threading
 import queue
+from PIL import Image
 
 from estimater import *
 from datareader import *
@@ -17,6 +18,9 @@ PORT_CMD = 6666
 PORT_VID_IN = 6667   
 PORT_VID_OUT = 6668
 SHARED_DIR = "/data"
+script_dir = os.path.dirname(os.path.realpath(__file__))
+texture_dir = os.path.join(script_dir, "textures")
+print(f"[DEBUG] Suche Texturen in: {texture_dir}")
 
 def make_mask_from_rect(rect, width, height):
     x, y, w, h = rect
@@ -95,10 +99,16 @@ class FPRunner:
         self.is_first_frame = True
         self.mask_rect = None 
         self.K = np.array([[615.3, 0.0, 320.0], [0.0, 615.3, 240.0], [0.0, 0.0, 1.0]])
+        
+        self.current_mesh_file = None
+        self.current_texture_name = None
 
-    def load_mesh(self, filename):
+    def load_mesh(self, filename, texture_name=None):
         mesh_path = os.path.join(SHARED_DIR, filename)
         print(f"[DOCKER] Lade Mesh von: {mesh_path}")
+        
+        self.current_mesh_file = filename
+        self.current_texture_name = texture_name
         
         mesh = trimesh.load(mesh_path, force='mesh')
         mesh.apply_scale(0.001) 
@@ -106,8 +116,40 @@ class FPRunner:
         if len(mesh.faces) > 10000:
             mesh = mesh.simplify_quadratic_decimation(10000)
             
-        color_array = np.array([90, 160, 200])
-        mesh = trimesh_add_pure_colored_texture(mesh, color_array)
+        if texture_name:
+            tex_path = os.path.join(texture_dir, texture_name)
+            image_file = None
+            if os.path.exists(tex_path):
+                for f in os.listdir(tex_path):
+                    if "Color" in f and f.endswith(('.jpg', '.png')):
+                        image_file = os.path.join(tex_path, f)
+                        break
+                if not image_file:
+                    for f in os.listdir(tex_path):
+                        if f.endswith(('.jpg', '.png')):
+                            image_file = os.path.join(tex_path, f)
+                            break
+            
+            if image_file:
+                print(f"[DOCKER] Appliziere Textur: {image_file}")
+                try:
+                    pil_image = Image.open(image_file)
+                    material = trimesh.visual.texture.SimpleMaterial(image=pil_image)
+                    
+                    if hasattr(mesh.visual, 'uv') and mesh.visual.uv is not None:
+                        mesh.visual.material = material
+                    else:
+                        print("[WARN] Mesh hat keine UV-Koordinaten! Textur wird komisch aussehen.")
+                        mesh.visual = trimesh.visual.TextureVisuals(uv=mesh.vertices[:, :2], material=material)
+                except Exception as e:
+                    print(f"[ERROR] Textur konnte nicht geladen werden: {e}")
+                    mesh = trimesh_add_pure_colored_texture(mesh, np.array([200, 50, 50]))
+            else:
+                print("[WARN] Textur-Ordner leer oder nicht gefunden. Nutze Standard-Farbe.")
+                mesh = trimesh_add_pure_colored_texture(mesh, np.array([90, 160, 200]))
+        else:
+            color_array = np.array([90, 160, 200])
+            mesh = trimesh_add_pure_colored_texture(mesh, color_array)
         
         self.bbox = mesh.bounds 
         
@@ -120,7 +162,7 @@ class FPRunner:
             glctx=self.glctx
         )
         self.mesh_loaded = True
-        print("[DOCKER] FoundationPose ready.")
+        print("[DOCKER] FoundationPose (Re-)Initialized.")
 
     def get_box_points_2d(self, pose, K):
         min_pt = self.bbox[0]
@@ -198,6 +240,7 @@ def main():
         if cmd_socket in socks:
             msg = cmd_socket.recv_pyobj()
             cmd = msg.get("cmd")
+            
             if cmd == "INIT":
                 try:
                     runner.mask_rect = msg["mask_rect"]
@@ -205,22 +248,34 @@ def main():
                     runner.load_mesh(msg["filename"])
                     runner.is_first_frame = True 
                     cmd_socket.send_string("OK")
-                except: cmd_socket.send_string("ERROR")
+                except Exception as e: 
+                    print(f"INIT Error: {e}")
+                    cmd_socket.send_string("ERROR")
+            
             elif cmd == "STOP":
                 runner.mesh_loaded = False 
                 cmd_socket.send_string("OK")
+                
+            elif cmd == "SET_TEXTURE":
+                try:
+                    tex_name = msg.get("name")
+                    if runner.current_mesh_file:
+                        runner.load_mesh(runner.current_mesh_file, texture_name=tex_name)
+                        cmd_socket.send_string("OK")
+                    else:
+                        cmd_socket.send_string("ERROR: NO MESH")
+                except Exception as e:
+                    print(f"Texture Error: {e}")
+                    cmd_socket.send_string("ERROR")
 
         frame_data = decoder_thread.get_latest()
         
         if frame_data and runner.mesh_loaded:
             rgb, depth = frame_data
-            
             try:
                 t_start = time.time()
                 points_2d, pose = runner.process_frame(rgb, depth)
-                
                 dt = time.time() - t_start
-                if dt > 0: print(f"GPU FPS: {1.0/dt:.1f}")
                 
                 if points_2d is not None:
                     vid_out_socket.send_pyobj({
