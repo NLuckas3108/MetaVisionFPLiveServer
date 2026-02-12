@@ -1,6 +1,6 @@
 #!/bin/bash
 
-CONTAINER_NAME="fp_server_instance"
+CONTAINER_NAME="mtfpl_server_instance"
 IMAGE_NAME="mtfpl:v1"
 
 if [ "$(docker ps -q -f name=$CONTAINER_NAME)" ]; then

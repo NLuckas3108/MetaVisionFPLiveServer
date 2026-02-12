@@ -1,6 +1,6 @@
 #!/bin/bash
 
-CONTAINER_NAME="fp_server_instance"
+CONTAINER_NAME="mtfpl_server_instance"
 
 if [ ! "$(docker ps -q -f name=$CONTAINER_NAME)" ]; then
     echo -e "\033[0;33m[INFO] Der Server '$CONTAINER_NAME' läuft gar nicht.\033[0m"
