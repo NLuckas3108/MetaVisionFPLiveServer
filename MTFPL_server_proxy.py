@@ -17,7 +17,9 @@ INT_PORT_CMD = 6666
 INT_PORT_VID_IN = 6667 
 INT_PORT_VID_OUT = 6668 
 
-SHARED_DIR = "/tmp/fp_shared"
+SHARED_DIR = "/workspace/shared_data"
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+TEXTURE_DIR = os.path.join(SCRIPT_DIR, "textures")
 
 print(f"=== Host Proxy Server ===")
 
@@ -166,14 +168,14 @@ def ext_command_loop():
 def get_available_textures(texture_path="textures"):
     texture_list = []
     
-    if not os.path.exists(texture_path):
+    if not os.path.exists(TEXTURE_DIR):
         return []
 
     for item in os.listdir(texture_path):
         sub_dir = os.path.join(texture_path, item)
         if os.path.isdir(sub_dir):
             image_file = None
-            for f in os.listdir(sub_dir):
+            for f in os.listdir(TEXTURE_DIR):
                 if "Color" in f and f.endswith(('.jpg', '.png')):
                     image_file = os.path.join(sub_dir, f)
                     break
@@ -199,7 +201,7 @@ def get_available_textures(texture_path="textures"):
 
 def load_full_texture_data(texture_name, base_path="textures"):
     """Sucht die Original-Datei für eine Textur und gibt die Bytes zurück"""
-    target_dir = os.path.join(base_path, texture_name)
+    target_dir = os.path.join(TEXTURE_DIR, texture_name)
     if not os.path.exists(target_dir):
         return None
     

@@ -17,7 +17,7 @@ from myUtils import *
 PORT_CMD = 6666
 PORT_VID_IN = 6667   
 PORT_VID_OUT = 6668
-SHARED_DIR = "/data"
+SHARED_DIR = "/workspace/shared_data"
 script_dir = os.path.dirname(os.path.realpath(__file__))
 texture_dir = os.path.join(script_dir, "textures")
 print(f"[DEBUG] Suche Texturen in: {texture_dir}")
