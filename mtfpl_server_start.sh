@@ -1,7 +1,7 @@
 #!/bin/bash
 
 CONTAINER_NAME="mtfpl_server_instance"
-IMAGE_NAME="mtfpl:v1"
+IMAGE_NAME="mtfpl:v2"
 
 if [ "$(docker ps -q -f name=$CONTAINER_NAME)" ]; then
     echo -e "\033[0;33m[INFO] Der Server '$CONTAINER_NAME' läuft bereits.\033[0m"
@@ -15,14 +15,16 @@ echo -e "\033[0;32m[START] Starte FoundationPose Server ($IMAGE_NAME)...\033[0m"
 
 docker run -d \
   --gpus all \
-  --network host \
+  -p 5555:5555 \
+  -p 5556:5556 \
+  -p 5557:5557 \
   --name $CONTAINER_NAME \
   --rm \
   $IMAGE_NAME
 
 if [ $? -eq 0 ]; then
     echo "✅ Server erfolgreich gestartet!"
-    echo "Logs ansehen: ./docker logs -f $CONTAINER_NAME"
+    echo "Logs ansehen: docker logs -f $CONTAINER_NAME"
 else
     echo -e "\033[0;31m❌ Fehler beim Starten des Servers.\033[0m"
 fi

@@ -148,8 +148,14 @@ class FPRunner:
                 print("[WARN] Textur-Ordner leer oder nicht gefunden. Nutze Standard-Farbe.")
                 mesh = trimesh_add_pure_colored_texture(mesh, np.array([90, 160, 200]))
         else:
-            color_array = np.array([90, 160, 200])
-            mesh = trimesh_add_pure_colored_texture(mesh, color_array)
+            has_auto_texture = hasattr(mesh.visual, 'material') and hasattr(mesh.visual.material, 'image') and mesh.visual.material.image is not None
+            
+            if has_auto_texture:
+                print("[DOCKER] Nutze gebündelte Textur aus .mtl/.png.")
+            else:
+                print("[DOCKER] Keine Textur gefunden. Nutze Standard-Farbe blau.")
+                color_array = np.array([90, 160, 200])
+                mesh = trimesh_add_pure_colored_texture(mesh, color_array)
         
         self.bbox = mesh.bounds 
         

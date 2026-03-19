@@ -30,7 +30,7 @@ class ProxyServer:
         
         self.docker_cmd = self.context.socket(zmq.REQ)
         self.docker_cmd.connect(f"tcp://127.0.0.1:{INT_PORT_CMD}")
-        self.docker_cmd.setsockopt(zmq.RCVTIMEO, 20000)
+        self.docker_cmd.setsockopt(zmq.RCVTIMEO, 60000)
 
     def save_cad_locally(self, filename, data):
         filepath = os.path.join(SHARED_DIR, filename)
@@ -104,6 +104,17 @@ def ext_command_loop():
             if cmd == "UPLOAD_CAD":
                 proxy.save_cad_locally(msg["filename"], msg["data"])
                 proxy.current_filename = msg["filename"]
+                socket.send_string("OK")
+            
+            elif cmd == "UPLOAD_CAD_BUNDLE":
+                filename = msg["filename"]
+                base_name = os.path.splitext(filename)[0]
+                
+                proxy.save_cad_locally(filename, msg["obj_data"])
+                proxy.save_cad_locally(base_name + ".mtl", msg["mtl_data"])
+                proxy.save_cad_locally(base_name + ".png", msg["png_data"])
+                
+                proxy.current_filename = filename
                 socket.send_string("OK")
                 
             elif cmd == "SET_MASK":
